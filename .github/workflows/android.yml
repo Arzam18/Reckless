@@ -22,14 +22,18 @@ jobs:
           unzip -q android-ndk-r26d-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-      - name: Create clang wrapper for Android target
+      - name: Create clang and ar wrappers for Android target
         run: |
           mkdir -p $HOME/ndk-wrapper
           cat > $HOME/ndk-wrapper/clang << 'EOF'
           #!/bin/bash
           exec "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" "$@"
           EOF
-          chmod +x $HOME/ndk-wrapper/clang
+          cat > $HOME/ndk-wrapper/aarch64-linux-android-ar << 'EOF'
+          #!/bin/bash
+          exec "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" "$@"
+          EOF
+          chmod +x $HOME/ndk-wrapper/clang $HOME/ndk-wrapper/aarch64-linux-android-ar
           echo "$HOME/ndk-wrapper" >> $GITHUB_PATH
 
       - name: Build
@@ -38,6 +42,7 @@ jobs:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /home/runner/work/Reckless/Reckless/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
         run: |
           which clang
+          which aarch64-linux-android-ar
           cargo rustc --release --target aarch64-linux-android --bin reckless -- --emit link=reckless
 
       - name: List build output
