@@ -1,0 +1,52 @@
+name: Reckless
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ARM64 Android target
+        run: |
+          rustup target add aarch64-linux-android
+
+      - name: Install Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
+          unzip -q android-ndk-r26d-linux.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+          echo "CC_aarch64_linux_android=$PWD/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$PWD/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" >> $GITHUB_ENV
+          echo "AR_aarch64_linux_android=$PWD/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-C target-feature=+neon,+dotprod"
+        run: |
+          cargo rustc --release --target aarch64-linux-android --bin reckless -- --emit link=reckless
+
+      - name: List build output
+        run: |
+          find . -maxdepth 1 -type f -executable
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reckless-android-arm64
+          path: reckless
+
+      - name: Create prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-build-${{ github.run_number }}
+          name: Reckless Build ${{ github.run_number }}
+          prerelease: true
+          files: reckless
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
