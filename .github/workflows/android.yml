@@ -2,6 +2,11 @@ name: Reckless
 
 on:
   workflow_dispatch:
+    inputs:
+      uci_date:
+        description: "UCI version/date (e.g. 20260909)"
+        required: true
+        default: "20260909"
 
 permissions:
   contents: write
@@ -35,6 +40,49 @@ jobs:
           EOF
           chmod +x $HOME/ndk-wrapper/clang $HOME/ndk-wrapper/aarch64-linux-android-ar
           echo "$HOME/ndk-wrapper" >> $GITHUB_PATH
+
+      - name: Set UCI Version
+        env:
+          UCI_DATE: ${{ inputs.uci_date }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["UCI_DATE"]
+          path = Path("build/build.rs")
+
+          text = path.read_text()
+
+          old = '''fn generate_engine_version() {
+    let version = env!("CARGO_PKG_VERSION");
+
+    let git_sha = Command::new("git")
+        .args(["rev-parse", "--short=8", "HEAD"])
+        .output()
+        .ok()
+        .filter(|v| v.status.success())
+        .and_then(|v| String::from_utf8(v.stdout).ok())
+        .map(|v| v.trim().to_string());
+
+    if let Some(sha) = git_sha {
+        println!("cargo:rustc-env=ENGINE_VERSION={version}-{sha}")
+    } else {
+        println!("cargo:rustc-env=ENGINE_VERSION={version}")
+    }
+}'''
+
+          new = f'''fn generate_engine_version() {{
+    let version = "{version}";
+    println!("cargo:rustc-env=ENGINE_VERSION={{version}}");
+}}'''
+
+          if old not in text:
+              raise SystemExit("Could not find the expected generate_engine_version() function.")
+
+          path.write_text(text.replace(old, new, 1))
+          print(f"Set Reckless UCI version to: {version}")
+          PY
 
       - name: Build
         env:
