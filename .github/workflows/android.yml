@@ -1,12 +1,13 @@
-name: Reckless
+name: Reckless Android ARM64
 
 on:
   workflow_dispatch:
     inputs:
       uci_date:
-        description: "UCI version/date (e.g. 20260909)"
+        description: "UCI version/date (YYYYMMDD)"
         required: true
-        default: "20260909"
+        default: "20261127"
+        type: string
 
 permissions:
   contents: write
@@ -14,105 +15,162 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      UCI_DATE: ${{ inputs.uci_date }}
+      ANDROID_NDK_VERSION: "27.2.12479018"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v4
 
-      - name: Install Rust ARM64 Android target
+      - name: Validate UCI date
+        shell: bash
         run: |
-          rustup target add aarch64-linux-android
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from datetime import datetime
+
+          value = os.environ["UCI_DATE"]
+          if not re.fullmatch(r"[0-9]{8}", value):
+              raise SystemExit("uci_date must use YYYYMMDD format")
+          try:
+              datetime.strptime(value, "%Y%m%d")
+          except ValueError as error:
+              raise SystemExit(f"Invalid uci_date: {error}")
+          print(f"Using UCI version: {value}")
+          PY
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: platform-tools
 
       - name: Install Android NDK
+        shell: bash
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
-          unzip -q android-ndk-r26d-linux.zip
-          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26d" >> $GITHUB_ENV
+          set -euo pipefail
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          NDK="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+          test -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      - name: Create clang and ar wrappers for Android target
+      - name: Set UCI version to selected date
+        shell: bash
         run: |
-          mkdir -p $HOME/ndk-wrapper
-          cat > $HOME/ndk-wrapper/clang << 'EOF'
-          #!/bin/bash
-          exec "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" "$@"
-          EOF
-          cat > $HOME/ndk-wrapper/aarch64-linux-android-ar << 'EOF'
-          #!/bin/bash
-          exec "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" "$@"
-          EOF
-          chmod +x $HOME/ndk-wrapper/clang $HOME/ndk-wrapper/aarch64-linux-android-ar
-          echo "$HOME/ndk-wrapper" >> $GITHUB_PATH
-
-      - name: Set UCI Version
-        env:
-          UCI_DATE: ${{ inputs.uci_date }}
-        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import os
           from pathlib import Path
 
-          version = os.environ["UCI_DATE"]
+          date = os.environ["UCI_DATE"]
           path = Path("build/build.rs")
+          source = path.read_text()
+          marker = "fn generate_engine_version() {"
 
-          text = path.read_text()
+          if source.count(marker) != 1:
+              raise SystemExit("Could not uniquely locate generate_engine_version() in build/build.rs")
 
-          old = '''fn generate_engine_version() {
-              let version = env!("CARGO_PKG_VERSION");
-
-              let git_sha = Command::new("git")
-                  .args(["rev-parse", "--short=8", "HEAD"])
-                  .output()
-                  .ok()
-                  .filter(|v| v.status.success())
-                  .and_then(|v| String::from_utf8(v.stdout).ok())
-                  .map(|v| v.trim().to_string());
-
-              if let Some(sha) = git_sha {
-                  println!("cargo:rustc-env=ENGINE_VERSION={version}-{sha}")
-              } else {
-                  println!("cargo:rustc-env=ENGINE_VERSION={version}")
-              }
-          }'''
-
-          new = f'''fn generate_engine_version() {{
-              let version = "{version}";
-              println!("cargo:rustc-env=ENGINE_VERSION={{version}}");
-          }}'''
-
-          if old not in text:
-              raise SystemExit(
-                  "Could not find the expected generate_engine_version() function."
-              )
-
-          path.write_text(text.replace(old, new, 1))
-
-          print(f"Set Reckless UCI version to: {version}")
+          start = source.index(marker)
+          replacement = (
+              "fn generate_engine_version() {\n"
+              f'    let version = "{date}";\n'
+              '    println!("cargo:rustc-env=ENGINE_VERSION={version}");\n'
+              "}\n"
+          )
+          path.write_text(source[:start] + replacement)
+          print(f"Set UCI engine version to Reckless {date}")
           PY
 
-      - name: Build
-        env:
-          RUSTFLAGS: "-C target-feature=+neon,+dotprod"
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /home/runner/work/Reckless/Reckless/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
+      - name: Build Android ARM64 NEON binary
+        shell: bash
         run: |
-          which clang
-          which aarch64-linux-android-ar
-          cargo rustc --release --target aarch64-linux-android --bin reckless -- --emit link=reckless
+          set -euo pipefail
+          mkdir -p dist
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/reckless-target-neon"
+          cargo rustc --locked --release --target aarch64-linux-android --bin reckless --no-default-features -- \
+            -C target-feature=+neon,-dotprod
+          cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/reckless" \
+            "dist/reckless-android-arm64-neon-${UCI_DATE}"
 
-      - name: List build output
+      - name: Build Android ARM64 DotProd binary (I8MM disabled)
+        shell: bash
         run: |
-          find . -maxdepth 1 -type f -executable
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/reckless-target-dotprod"
+          cargo rustc --locked --release --target aarch64-linux-android --bin reckless --no-default-features -- \
+            -C target-feature=+neon,+dotprod,-i8mm
+          cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/reckless" \
+            "dist/reckless-android-arm64-dotprod-${UCI_DATE}"
 
-      - name: Upload artifact
+      - name: Verify architecture, UCI version, and SIMD instructions
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLVM_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          READELF="$LLVM_BIN/llvm-readelf"
+          OBJDUMP="$LLVM_BIN/llvm-objdump"
+          NEON="dist/reckless-android-arm64-neon-${UCI_DATE}"
+          DOTPROD="dist/reckless-android-arm64-dotprod-${UCI_DATE}"
+
+          for binary in "$NEON" "$DOTPROD"; do
+            test -s "$binary"
+            "$READELF" -h "$binary" | grep -q 'Machine:.*AArch64'
+            output="$(printf 'uci\nquit\n' | "$binary")"
+            grep -Fq "id name Reckless ${UCI_DATE}" <<< "$output"
+          done
+
+          "$OBJDUMP" -d "$NEON" > "$RUNNER_TEMP/reckless-neon.disasm"
+          "$OBJDUMP" -d "$DOTPROD" > "$RUNNER_TEMP/reckless-dotprod.disasm"
+
+          if grep -Eiq '\bsdot\b' "$RUNNER_TEMP/reckless-neon.disasm"; then
+            echo "ERROR: NEON binary unexpectedly contains a DotProd instruction" >&2
+            exit 1
+          fi
+          if ! grep -Eiq '\bsdot\b' "$RUNNER_TEMP/reckless-dotprod.disasm"; then
+            echo "ERROR: DotProd binary does not contain the expected SDOT instruction" >&2
+            exit 1
+          fi
+          if grep -Eiq '\b(usdot|sudot|smmla|ummla|usmmla)\b' "$RUNNER_TEMP/reckless-dotprod.disasm"; then
+            echo "ERROR: DotProd binary unexpectedly contains an I8MM instruction" >&2
+            exit 1
+          fi
+
+          echo "Verified AArch64 NEON and DotProd binaries; I8MM instructions are absent."
+          sha256sum "$NEON" "$DOTPROD"
+
+      - name: Upload NEON artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reckless-android-arm64
-          path: reckless
+          name: reckless-android-arm64-neon-${{ inputs.uci_date }}
+          path: dist/reckless-android-arm64-neon-${{ inputs.uci_date }}
+          if-no-files-found: error
 
-      - name: Create prerelease
+      - name: Upload DotProd artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reckless-android-arm64-dotprod-${{ inputs.uci_date }}
+          path: dist/reckless-android-arm64-dotprod-${{ inputs.uci_date }}
+          if-no-files-found: error
+
+      - name: Publish Android prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: android-build-${{ github.run_number }}
-          name: Reckless Build ${{ github.run_number }}
+          tag_name: android-${{ inputs.uci_date }}-${{ github.run_number }}
+          name: Reckless Android ${{ inputs.uci_date }}
           prerelease: true
-          files: reckless
+          files: |
+            dist/reckless-android-arm64-neon-${{ inputs.uci_date }}
+            dist/reckless-android-arm64-dotprod-${{ inputs.uci_date }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
