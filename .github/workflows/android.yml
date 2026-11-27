@@ -98,8 +98,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           export CARGO_TARGET_DIR="$RUNNER_TEMP/reckless-target-neon"
-          cargo rustc --locked --release --target aarch64-linux-android --bin reckless --no-default-features -- \
-            -C target-feature=+neon,-dotprod
+          # RUSTFLAGS applies to the engine library as well as the UCI binary.
+          # The NNUE SIMD implementation is compiled into the library crate.
+          export RUSTFLAGS="-C target-feature=+neon,-dotprod"
+          cargo build --locked --release --target aarch64-linux-android --bin reckless --no-default-features
           cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/reckless" \
             "dist/reckless-android-arm64-neon-${UCI_DATE}"
 
@@ -108,8 +110,10 @@ jobs:
         run: |
           set -euo pipefail
           export CARGO_TARGET_DIR="$RUNNER_TEMP/reckless-target-dotprod"
-          cargo rustc --locked --release --target aarch64-linux-android --bin reckless --no-default-features -- \
-            -C target-feature=+neon,+dotprod,-i8mm
+          # Apply DotProd to every target crate, including the Reckless library.
+          # I8MM remains explicitly disabled.
+          export RUSTFLAGS="-C target-feature=+neon,+dotprod,-i8mm"
+          cargo build --locked --release --target aarch64-linux-android --bin reckless --no-default-features
           cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/reckless" \
             "dist/reckless-android-arm64-dotprod-${UCI_DATE}"
 
@@ -136,8 +140,10 @@ jobs:
             fi
           done
 
-          "$OBJDUMP" -d "$NEON" > "$RUNNER_TEMP/reckless-neon.disasm"
-          "$OBJDUMP" -d "$DOTPROD" > "$RUNNER_TEMP/reckless-dotprod.disasm"
+          # Tell LLVM to decode both DotProd and I8MM mnemonics so the checks
+          # can reliably detect SDOT and reject I8MM instructions.
+          "$OBJDUMP" --mattr=+dotprod,+i8mm -d "$NEON" > "$RUNNER_TEMP/reckless-neon.disasm"
+          "$OBJDUMP" --mattr=+dotprod,+i8mm -d "$DOTPROD" > "$RUNNER_TEMP/reckless-dotprod.disasm"
 
           if grep -Eiq '\bsdot\b' "$RUNNER_TEMP/reckless-neon.disasm"; then
             echo "ERROR: NEON binary unexpectedly contains a DotProd instruction" >&2
