@@ -113,7 +113,7 @@ jobs:
           cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/reckless" \
             "dist/reckless-android-arm64-dotprod-${UCI_DATE}"
 
-      - name: Verify architecture, UCI version, and SIMD instructions
+      - name: Verify architecture, UCI version stamp, and SIMD instructions
         shell: bash
         run: |
           set -euo pipefail
@@ -123,11 +123,17 @@ jobs:
           NEON="dist/reckless-android-arm64-neon-${UCI_DATE}"
           DOTPROD="dist/reckless-android-arm64-dotprod-${UCI_DATE}"
 
+          command -v strings >/dev/null
           for binary in "$NEON" "$DOTPROD"; do
             test -s "$binary"
             "$READELF" -h "$binary" | grep -q 'Machine:.*AArch64'
-            output="$(printf 'uci\nquit\n' | "$binary")"
-            grep -Fq "id name Reckless ${UCI_DATE}" <<< "$output"
+            # Cross-compiled Android ARM64 binaries cannot run on the x86_64
+            # GitHub-hosted Linux runner. Check the embedded compile-time
+            # ENGINE_VERSION string instead of executing the target binary.
+            if ! strings -a "$binary" | grep -Fq "$UCI_DATE"; then
+              echo "ERROR: UCI date $UCI_DATE was not found in $binary" >&2
+              exit 1
+            fi
           done
 
           "$OBJDUMP" -d "$NEON" > "$RUNNER_TEMP/reckless-neon.disasm"
